@@ -1,0 +1,484 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// =============================================================================
+// ENUMS
+// =============================================================================
+
+// -----------------------------------------------------------------------------
+// [REMOVED]: Role enum is not since the entire application is
+// single-actor (Rider-only). All users are riders interacting with the system.
+// -----------------------------------------------------------------------------
+// enum Role {
+//   RIDER
+//   DRIVER
+//   ADMIN
+// }
+
+/// Vehicle categorization matching ride tiers (Sedan, Hatchback, SUV, Auto).
+enum VehicleType {
+  SEDAN
+  HATCHBACK
+  SUV
+  AUTO
+}
+
+/// Lifecycle states of a ride request from the Rider's perspective.
+enum RideStatus {
+  REQUESTED
+  ACCEPTED
+  DRIVER_ARRIVING
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+/// Entity that initiated ride cancellation (Rider or automated System).
+enum CancelledBy {
+  RIDER
+  SYSTEM
+  // DRIVER - [REMOVED]: No driver app/actor
+  // ADMIN  - [REMOVED]: No admin app/actor
+}
+
+/// Supported payment methods for rider checkout.
+enum PaymentMethodEnum {
+  CARD
+  WALLET
+  UPI
+  OTHER
+}
+
+/// Processing status of a payment transaction.
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+}
+
+/// Discount calculation type for promotional codes.
+enum DiscountType {
+  PERCENTAGE
+  FIXED_AMOUNT
+}
+
+/// Status of an in-ride emergency/SOS alert.
+enum AlertStatus {
+  TRIGGERED
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+/// Categorization for customer support tickets filed by riders.
+enum SupportCategory {
+  PAYMENT
+  LOST_ITEM
+  DRIVER_ISSUE
+  RIDE_ISSUE
+  OTHER
+}
+
+/// Lifecycle states of customer support tickets.
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+/// System and event notification types received by riders.
+enum NotificationType {
+  RIDE_REQUEST
+  RIDE_ACCEPTED
+  DRIVER_ARRIVING
+  RIDE_STARTED
+  RIDE_COMPLETED
+  RIDE_CANCELLED
+  PAYMENT
+  SOS
+  SUPPORT
+}
+
+// =============================================================================
+// CORE USER MODEL (RIDER ONLY)
+// =============================================================================
+
+/// Core Rider entity representing the authenticated app user.
+/// Supports both credentials and social authentication (e.g. Clerk / OAuth).
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(100)
+  email        String   @unique @db.VarChar(255)
+  phone        String   @unique @db.VarChar(20)
+  passwordHash String?  @db.VarChar(255) // Optional to accommodate social logins / Clerk
+  profileImage String?  @db.VarChar(2048)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  // ---------------------------------------------------------------------------
+  // [REMOVED]: Role field removed — app is 100% Rider-only
+  // ---------------------------------------------------------------------------
+  // role          Role     @default(RIDER)
+
+  // Rider Relationships
+  rides             Ride[]             @relation("RiderToRide")
+  payments          Payment[]          @relation("RiderToPayment")
+  paymentMethods    PaymentMethod[]
+  reviews           Review[]           @relation("RiderToReview")
+  emergencyContacts EmergencyContact[]
+  supportTickets    SupportTicket[]
+  notifications     Notification[]
+  emergencyAlerts   EmergencyAlert[]
+
+  // ---------------------------------------------------------------------------
+  // [REMOVED]: Driver-specific relations
+  // ---------------------------------------------------------------------------
+  // driverProfile     DriverProfile?
+  // ridesAsDriver     Ride[]             @relation("DriverToRide")
+  // paymentsAsDriver  Payment[]          @relation("DriverToPayment")
+  // reviewsAsDriver   Review[]           @relation("DriverToReview")
+
+  @@index([email])
+  @@index([phone])
+}
+
+// -----------------------------------------------------------------------------
+// [REMOVED]: Driver Profile & Driver Telemetry Models
+// -----------------------------------------------------------------------------
+// model DriverProfile {
+//   id                  String      @id @default(uuid()) @db.Uuid
+//   userId              String      @unique @db.Uuid
+//   licenseNumber       String      @unique @db.VarChar(100)
+//   vehicleRegistration String      @unique @db.VarChar(30)
+//   vehicleMake         String      @db.VarChar(80)
+//   vehicleModel        String      @db.VarChar(80)
+//   vehicleColor        String      @db.VarChar(40)
+//   vehicleType         VehicleType
+//   vehicleCapacity     Int         @db.SmallInt
+//   isAvailable         Boolean     @default(false)
+//   averageRating       Decimal     @default(0.00) @db.Decimal(3, 2)
+//   totalRides          Int         @default(0)
+//   createdAt           DateTime    @default(now()) @db.Timestamptz(6)
+//   updatedAt           DateTime    @updatedAt @db.Timestamptz(6)
+//
+//   user            User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+//   driverLocations DriverLocation[]
+//
+//   @@index([isAvailable])
+//   @@index([vehicleType])
+// }
+//
+// model DriverLocation {
+//   id         String   @id @default(uuid()) @db.Uuid
+//   driverId   String   @db.Uuid
+//   latitude   Decimal  @db.Decimal(10, 7)
+//   longitude  Decimal  @db.Decimal(10, 7)
+//   heading    Decimal? @db.Decimal(6, 2)
+//   speedKmh   Decimal? @db.Decimal(7, 2)
+//   recordedAt DateTime @default(now()) @db.Timestamptz(6)
+//
+//   driver DriverProfile @relation(fields: [driverId], references: [id], onDelete: Cascade)
+//
+//   @@index([driverId])
+//   @@index([recordedAt])
+// }
+
+// =============================================================================
+// RIDE & TRACKING MODELS
+// =============================================================================
+
+/// Primary ride transaction managing routes, fares, duration, and status transitions for riders.
+model Ride {
+  id                   String       @id @default(uuid()) @db.Uuid
+  riderId              String       @db.Uuid
+  pickupAddress        String       @db.VarChar(500)
+  pickupLatitude       Decimal      @db.Decimal(10, 7)
+  pickupLongitude      Decimal      @db.Decimal(10, 7)
+  dropoffAddress       String       @db.VarChar(500)
+  dropoffLatitude      Decimal      @db.Decimal(10, 7)
+  dropoffLongitude     Decimal      @db.Decimal(10, 7)
+  rideType             VehicleType
+  status               RideStatus   @default(REQUESTED)
+  distanceKm           Decimal      @db.Decimal(10, 2)
+  estimatedFare        Decimal      @db.Decimal(12, 2)
+  finalFare            Decimal?     @db.Decimal(12, 2)
+  estimatedDurationMin Int
+  actualDurationMin    Int?
+  cancellationReason   String?      @db.VarChar(500)
+  cancelledBy          CancelledBy?
+  requestedAt          DateTime     @default(now()) @db.Timestamptz(6)
+  acceptedAt           DateTime?    @db.Timestamptz(6)
+  startedAt            DateTime?    @db.Timestamptz(6)
+  completedAt          DateTime?    @db.Timestamptz(6)
+  cancelledAt          DateTime?    @db.Timestamptz(6)
+  createdAt            DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt            DateTime     @updatedAt @db.Timestamptz(6)
+
+  // ---------------------------------------------------------------------------
+  // Assigned Driver Details (Stored for Rider UI display & tracking simulation)
+  // ---------------------------------------------------------------------------
+  driverName        String?  @db.VarChar(100)
+  driverPhone       String?  @db.VarChar(20)
+  driverVehicle     String?  @db.VarChar(100)
+  driverPlateNumber String?  @db.VarChar(30)
+  driverRating      Decimal? @db.Decimal(3, 2)
+  // [REMOVED]: Foreign key to driver user account
+  // driverId          String?      @db.Uuid
+  // driver            User?        @relation("DriverToRide", fields: [driverId], references: [id])
+
+  // Relationships
+  rider          User             @relation("RiderToRide", fields: [riderId], references: [id])
+  stops          RideStop[]
+  payment        Payment?
+  review         Review?
+  promotion      RidePromotion?
+  alerts         EmergencyAlert[]
+  supportTickets SupportTicket[]
+  notifications  Notification[]
+
+  @@index([riderId])
+  @@index([status])
+  @@index([createdAt])
+}
+
+/// Ordered intermediary waypoints for multi-stop rides (Use Case 10).
+model RideStop {
+  id        String   @id @default(uuid()) @db.Uuid
+  rideId    String   @db.Uuid
+  sequence  Int
+  address   String   @db.VarChar(500)
+  latitude  Decimal  @db.Decimal(10, 7)
+  longitude Decimal  @db.Decimal(10, 7)
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+
+  // Relationships
+  ride Ride @relation(fields: [rideId], references: [id], onDelete: Cascade)
+
+  @@unique([rideId, sequence])
+  @@index([rideId])
+}
+
+// =============================================================================
+// PAYMENTS & PROMOTIONS
+// =============================================================================
+
+/// Rider payment records (Stripe, UPI, Wallets - Use Case 6). Raw card details are never stored.
+model Payment {
+  id                String            @id @default(uuid()) @db.Uuid
+  rideId            String            @unique @db.Uuid
+  riderId           String            @db.Uuid
+  amount            Decimal           @db.Decimal(12, 2)
+  currency          String            @default("USD") @db.Char(3)
+  method            PaymentMethodEnum
+  status            PaymentStatus     @default(PENDING)
+  provider          String            @db.VarChar(30)
+  providerPaymentId String?           @unique @db.VarChar(255)
+  receiptUrl        String?           @db.VarChar(2048)
+  paidAt            DateTime?         @db.Timestamptz(6)
+  createdAt         DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt         DateTime          @updatedAt @db.Timestamptz(6)
+
+  // ---------------------------------------------------------------------------
+  // [REMOVED]: Driver payout relationship
+  // ---------------------------------------------------------------------------
+  // driverId          String            @db.Uuid
+  // driver            User              @relation("DriverToPayment", fields: [driverId], references: [id])
+
+  // Relationships
+  ride  Ride @relation(fields: [rideId], references: [id])
+  rider User @relation("RiderToPayment", fields: [riderId], references: [id])
+
+  @@index([rideId])
+  @@index([riderId])
+  @@index([status])
+}
+
+/// Vaulted payment methods saved by the rider (Use Case 2).
+model PaymentMethod {
+  id                 String            @id @default(uuid()) @db.Uuid
+  userId             String            @db.Uuid
+  provider           String            @db.VarChar(30)
+  providerCustomerId String            @db.VarChar(255)
+  providerMethodId   String            @unique @db.VarChar(255)
+  type               PaymentMethodEnum
+  displayLabel       String?           @db.VarChar(100)
+  isDefault          Boolean           @default(false)
+  createdAt          DateTime          @default(now()) @db.Timestamptz(6)
+  updatedAt          DateTime          @updatedAt @db.Timestamptz(6)
+
+  // Relationships
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Promotional coupons with usage quotas and date boundaries (Use Case 11).
+model PromoCode {
+  id              String       @id @default(uuid()) @db.Uuid
+  code            String       @unique @db.VarChar(50)
+  discountType    DiscountType
+  discountValue   Decimal      @db.Decimal(12, 2)
+  minimumFare     Decimal      @default(0.00) @db.Decimal(12, 2)
+  maximumDiscount Decimal?     @db.Decimal(12, 2)
+  startsAt        DateTime     @db.Timestamptz(6)
+  expiresAt       DateTime     @db.Timestamptz(6)
+  usageLimit      Int?
+  usageCount      Int          @default(0)
+  isActive        Boolean      @default(true)
+  createdAt       DateTime     @default(now()) @db.Timestamptz(6)
+  updatedAt       DateTime     @updatedAt @db.Timestamptz(6)
+
+  // Relationships
+  promotions RidePromotion[]
+
+  @@index([code])
+  @@index([isActive])
+}
+
+/// Promotion application mapping linking a ride to a validated promo code.
+model RidePromotion {
+  id             String   @id @default(uuid()) @db.Uuid
+  rideId         String   @unique @db.Uuid
+  promoCodeId    String   @db.Uuid
+  discountAmount Decimal  @db.Decimal(12, 2)
+  createdAt      DateTime @default(now()) @db.Timestamptz(6)
+
+  // Relationships
+  ride      Ride      @relation(fields: [rideId], references: [id], onDelete: Cascade)
+  promoCode PromoCode @relation(fields: [promoCodeId], references: [id])
+
+  @@index([promoCodeId])
+}
+
+// =============================================================================
+// REVIEWS, SAFETY & CUSTOMER SUPPORT
+// =============================================================================
+
+/// Post-ride reviews and ratings (1-5 stars) submitted by riders (Use Case 9).
+model Review {
+  id        String   @id @default(uuid()) @db.Uuid
+  rideId    String   @unique @db.Uuid
+  riderId   String   @db.Uuid
+  rating    Int      @db.SmallInt
+  feedback  String?  @db.Text
+  createdAt DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt DateTime @updatedAt @db.Timestamptz(6)
+
+  // ---------------------------------------------------------------------------
+  // [REMOVED]: Driver recipient relationship
+  // ---------------------------------------------------------------------------
+  // driverId  String   @db.Uuid
+  // driver    User     @relation("DriverToReview", fields: [driverId], references: [id])
+
+  // Relationships
+  ride  Ride @relation(fields: [rideId], references: [id])
+  rider User @relation("RiderToReview", fields: [riderId], references: [id])
+
+  @@index([riderId])
+}
+
+/// Real-time SOS / emergency triggers recorded during active trips (Use Case 12).
+model EmergencyAlert {
+  id          String      @id @default(uuid()) @db.Uuid
+  rideId      String      @db.Uuid
+  riderId     String      @db.Uuid
+  latitude    Decimal     @db.Decimal(10, 7)
+  longitude   Decimal     @db.Decimal(10, 7)
+  status      AlertStatus @default(TRIGGERED)
+  triggeredAt DateTime    @default(now()) @db.Timestamptz(6)
+  resolvedAt  DateTime?   @db.Timestamptz(6)
+
+  // Relationships
+  ride  Ride @relation(fields: [rideId], references: [id])
+  rider User @relation(fields: [riderId], references: [id])
+
+  @@index([rideId])
+  @@index([riderId])
+  @@index([status])
+}
+
+/// Trusted emergency contacts notified during SOS triggers (Use Case 12).
+model EmergencyContact {
+  id           String   @id @default(uuid()) @db.Uuid
+  userId       String   @db.Uuid
+  name         String   @db.VarChar(100)
+  phone        String   @db.VarChar(20)
+  relationship String   @db.VarChar(50)
+  createdAt    DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @db.Timestamptz(6)
+
+  // Relationships
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+/// Help desk tickets filed by riders and answered by automated system / support (Use Case 13).
+model SupportTicket {
+  id             String          @id @default(uuid()) @db.Uuid
+  userId         String          @db.Uuid
+  rideId         String?         @db.Uuid
+  category       SupportCategory
+  subject        String          @db.VarChar(200)
+  description    String          @db.Text
+  status         SupportStatus   @default(OPEN)
+  systemResponse String?         @db.Text // Automated system response / support response
+  // [REMOVED]: adminResponse renamed to systemResponse as Admin actor is removed
+  // adminResponse String?        @db.Text
+  resolvedAt     DateTime?       @db.Timestamptz(6)
+  createdAt      DateTime        @default(now()) @db.Timestamptz(6)
+  updatedAt      DateTime        @updatedAt @db.Timestamptz(6)
+
+  // Relationships
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ride Ride? @relation(fields: [rideId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([rideId])
+  @@index([status])
+}
+
+/// In-app user notifications for dispatch, alerts, and system events (Use Case 4).
+model Notification {
+  id        String           @id @default(uuid()) @db.Uuid
+  userId    String           @db.Uuid
+  rideId    String?          @db.Uuid
+  type      NotificationType
+  title     String           @db.VarChar(150)
+  message   String           @db.VarChar(1000)
+  isRead    Boolean          @default(false)
+  createdAt DateTime         @default(now()) @db.Timestamptz(6)
+  readAt    DateTime?        @db.Timestamptz(6)
+
+  // Relationships
+  user User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  ride Ride? @relation(fields: [rideId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([rideId])
+  @@index([isRead])
+}
+
+/// Configurable rules for cancellation windows and associated fees (Use Case 8).
+model CancellationPolicy {
+  id                  String   @id @default(uuid()) @db.Uuid
+  name                String   @db.VarChar(100)
+  freeCancellationMin Int
+  cancellationFee     Decimal  @db.Decimal(12, 2)
+  isActive            Boolean  @default(true)
+  createdAt           DateTime @default(now()) @db.Timestamptz(6)
+  updatedAt           DateTime @updatedAt @db.Timestamptz(6)
+
+  @@index([isActive])
+}
