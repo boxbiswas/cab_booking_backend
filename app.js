@@ -3,7 +3,9 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 
+import { createServer } from 'node:http';
 import { prisma } from "./lib/prisma.js";
+import { initSocket } from "./lib/socket.js";
 
 // Import routes
 import authRoute from "./routes/authRoute.js";
@@ -60,9 +62,13 @@ app.use((err, req, res, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
+const httpServer = createServer(app);
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running and listening on port ${PORT}`);
+// Initialize Socket.IO
+initSocket(httpServer);
+
+httpServer.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server and Socket.IO are running and listening on port ${PORT}`);
 });
 
 export default app;

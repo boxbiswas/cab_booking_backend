@@ -1,4 +1,10 @@
 import { prisma } from '../lib/prisma.js';
+import {
+    emitRideStatus,
+    emitDriverLocation,
+    startDriverSimulation,
+    stopDriverSimulation
+} from '../lib/socket.js';
 
 // Base pricing rules per vehicle category
 const TIER_PRICING = {
@@ -208,6 +214,40 @@ export const acceptRide = async (req, res) => {
             }
         });
 
+        // Emit real-time status update & in-app notification to ride room
+        emitRideStatus(id, 'ACCEPTED', updatedRide, {
+            title: 'Driver Assigned',
+            message: `${updatedRide.driverName} has accepted your ride and is en route!`,
+            type: 'accepted'
+        });
+
+        // Start live driver telemetry simulation heading towards pickup
+        const pickupLat = Number(updatedRide.pickupLatitude);
+        const pickupLng = Number(updatedRide.pickupLongitude);
+        const driverStartCoord = {
+            latitude: pickupLat + 0.008,
+            longitude: pickupLng + 0.007
+        };
+
+        startDriverSimulation(id, driverStartCoord, { latitude: pickupLat, longitude: pickupLng }, {
+            status: 'EN_ROUTE_PICKUP',
+            onComplete: async () => {
+                try {
+                    const arrivingRide = await prisma.ride.update({
+                        where: { id },
+                        data: { status: 'DRIVER_ARRIVING' }
+                    });
+                    emitRideStatus(id, 'DRIVER_ARRIVING', arrivingRide, {
+                        title: 'Driver Arrived',
+                        message: `${arrivingRide.driverName} has arrived at your pickup location!`,
+                        type: 'arriving'
+                    });
+                } catch (err) {
+                    console.warn("Auto-transition to DRIVER_ARRIVING failed:", err.message);
+                }
+            }
+        });
+
         return res.status(200).json({
             message: 'Ride accepted successfully and driver assigned.',
             ride: updatedRide
@@ -296,6 +336,65 @@ export const updateRideStatus = async (req, res) => {
             where: { id },
             data: updateData
         });
+
+        // Notifications and telemetry handling per status
+        if (status === 'DRIVER_ARRIVING') {
+            emitRideStatus(id, 'DRIVER_ARRIVING', updatedRide, {
+                title: 'Driver Arrived',
+                message: `${updatedRide.driverName || 'Driver'} is at your pickup location!`,
+                type: 'arriving'
+            });
+        } else if (status === 'IN_PROGRESS') {
+            emitRideStatus(id, 'IN_PROGRESS', updatedRide, {
+                title: 'Ride Started',
+                message: `You're on your way to ${updatedRide.dropoffAddress.split(',')[0]}!`,
+                type: 'progress'
+            });
+
+            // Start simulation from pickup towards dropoff
+            const pLat = Number(updatedRide.pickupLatitude);
+            const pLng = Number(updatedRide.pickupLongitude);
+            const dLat = Number(updatedRide.dropoffLatitude);
+            const dLng = Number(updatedRide.dropoffLongitude);
+
+            startDriverSimulation(id, { latitude: pLat, longitude: pLng }, { latitude: dLat, longitude: dLng }, {
+                status: 'ON_TRIP',
+                onComplete: async () => {
+                    try {
+                        const finalRide = await prisma.ride.update({
+                            where: { id },
+                            data: {
+                                status: 'COMPLETED',
+                                completedAt: new Date(),
+                                finalFare: updatedRide.estimatedFare,
+                                actualDurationMin: updatedRide.estimatedDurationMin
+                            }
+                        });
+                        emitRideStatus(id, 'COMPLETED', finalRide, {
+                            title: 'Ride Completed',
+                            message: 'You have arrived at your destination. Hope you enjoyed the ride!',
+                            type: 'completed'
+                        });
+                    } catch (err) {
+                        console.warn("Auto-transition to COMPLETED failed:", err.message);
+                    }
+                }
+            });
+        } else if (status === 'COMPLETED') {
+            stopDriverSimulation(id);
+            emitRideStatus(id, 'COMPLETED', updatedRide, {
+                title: 'Ride Completed',
+                message: 'Thank you for riding with HopIn. Have a wonderful day!',
+                type: 'completed'
+            });
+        } else if (status === 'CANCELLED') {
+            stopDriverSimulation(id);
+            emitRideStatus(id, 'CANCELLED', updatedRide, {
+                title: 'Ride Cancelled',
+                message: 'Your ride request has been cancelled.',
+                type: 'cancelled'
+            });
+        }
 
         return res.status(200).json({
             message: `Ride status updated to ${status}`,
