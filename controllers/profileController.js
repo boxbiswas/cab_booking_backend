@@ -1,9 +1,7 @@
 import { prisma } from '../lib/prisma.js';
 
-/**
- * Fetch Rider profile with stats
- * GET /api/profile
- */
+// Fetch Rider profile with stats
+// GET /profile
 export const getProfile = async (req, res) => {
     try {
         const userId = req.user.id;
@@ -49,10 +47,8 @@ export const getProfile = async (req, res) => {
     }
 };
 
-/**
- * Update Rider profile details
- * PATCH /api/profile
- */
+// Update Rider profile details
+// PATCH /profile
 export const updateProfile = async (req, res) => {
     try {
         const userId = req.user.id;

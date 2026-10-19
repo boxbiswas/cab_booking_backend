@@ -13,30 +13,39 @@ import profileRoutes from "./routes/profileRoutes.js";
 import driverRoutes from "./routes/driverRoutes.js";
 import mapRoute from "./routes/mapRoute.js";
 import rideRoute from "./routes/rideRoute.js";
+import paymentRouter, { paymentMethodRouter } from "./routes/paymentRoutes.js";
 
 const app = express();
 
 // Cors configuration
 app.use(cors({
     origin: [
-        "http://localhost:5173",
-        "http://127.0.0.1:5173"
+        "http://localhost:5173"
     ],
     credentials: true, // Allows cookies to be sent back and forth
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cookie']
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cookie', 'stripe-signature']
 }));
 
-app.use(express.json({ limit: '50mb' }));
+// Capture raw body for Stripe webhook cryptographic signature verification
+app.use(express.json({
+    limit: '50mb',
+    verify: (req, res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(cookieParser());
 
-// Use routes (Direct clean routes for Rider app)
+// Use routes (Direct clean routes for Rider app only)
 app.use('/auth', authRoute);
 app.use('/profile', profileRoutes);
 app.use('/driver', driverRoutes);
+app.use('/drivers', driverRoutes);
 app.use('/maps', mapRoute);
 app.use('/rides', rideRoute);
+app.use('/payments', paymentRouter);
+app.use('/payment-methods', paymentMethodRouter);
 
 // Health check endpoint
 app.get('/health', async (req, res) => {

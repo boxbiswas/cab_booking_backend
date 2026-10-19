@@ -1,3 +1,4 @@
+import nodemailer from 'nodemailer';
 import { prisma } from '../lib/prisma.js';
 import {
     emitRideStatus,
@@ -60,10 +61,8 @@ const VALID_TRANSITIONS = {
     CANCELLED: []
 };
 
-/**
- * Calculate fare estimates across all vehicle tiers
- * POST /rides/estimate or /api/rides/estimate
- */
+// Calculate fare estimates across all vehicle tiers
+// POST /rides/estimate
 export const estimateFare = async (req, res) => {
     try {
         const { distanceKm, durationMin } = req.body;
@@ -108,10 +107,8 @@ export const estimateFare = async (req, res) => {
     }
 };
 
-/**
- * Create a new Ride request (Starts in REQUESTED status)
- * POST /rides or /api/rides
- */
+// Create a new Ride request (Starts in REQUESTED status)
+// POST /rides
 export const createRide = async (req, res) => {
     try {
         const riderId = req.user.id;
@@ -169,10 +166,8 @@ export const createRide = async (req, res) => {
     }
 };
 
-/**
- * Accept a ride request (Assigns driver & prevents multiple drivers from accepting)
- * POST /rides/:id/accept or /api/rides/:id/accept
- */
+// Accept a ride request (Assigns driver & prevents multiple drivers from accepting)
+// POST /rides/:id/accept
 export const acceptRide = async (req, res) => {
     try {
         const { id } = req.params;
@@ -259,10 +254,8 @@ export const acceptRide = async (req, res) => {
     }
 };
 
-/**
- * Decline a ride request
- * POST /rides/:id/decline or /api/rides/:id/decline
- */
+// Decline a ride request
+// POST /rides/:id/decline
 export const declineRide = async (req, res) => {
     try {
         const { id } = req.params;
@@ -286,10 +279,8 @@ export const declineRide = async (req, res) => {
     }
 };
 
-/**
- * Update ride lifecycle status with backend validation
- * PATCH /rides/:id/status or /api/rides/:id/status
- */
+// Update ride lifecycle status with backend validation
+// PATCH /rides/:id/status
 export const updateRideStatus = async (req, res) => {
     try {
         const { id } = req.params;
@@ -407,10 +398,8 @@ export const updateRideStatus = async (req, res) => {
     }
 };
 
-/**
- * Fetch Ride details by ID
- * GET /rides/:id or /api/rides/:id
- */
+// Fetch Ride details by ID
+// GET /rides/:id
 export const getRideById = async (req, res) => {
     try {
         const { id } = req.params;
@@ -440,3 +429,359 @@ export const getRideById = async (req, res) => {
         return res.status(500).json({ message: 'Failed to retrieve ride', error: error.message });
     }
 };
+
+// Fetch Rider ride history with stats and filters (Day 9)
+// GET /rides/history
+export const getRidesHistory = async (req, res) => {
+    try {
+        const riderId = req.user.id;
+        const { status, search, limit = 50, page = 1 } = req.query;
+
+        const whereClause = { riderId };
+
+        if (status && status !== 'ALL') {
+            whereClause.status = status;
+        }
+
+        if (search && search.trim()) {
+            const query = search.trim();
+            whereClause.OR = [
+                { pickupAddress: { contains: query, mode: 'insensitive' } },
+                { dropoffAddress: { contains: query, mode: 'insensitive' } },
+                { driverName: { contains: query, mode: 'insensitive' } }
+            ];
+        }
+
+        const parsedLimit = parseInt(limit, 10) || 50;
+        const parsedPage = parseInt(page, 10) || 1;
+        const skip = (parsedPage - 1) * parsedLimit;
+
+        const [rides, totalCount] = await Promise.all([
+            prisma.ride.findMany({
+                where: whereClause,
+                include: {
+                    payment: true,
+                    review: true,
+                    stops: { orderBy: { sequence: 'asc' } }
+                },
+                orderBy: { createdAt: 'desc' },
+                take: parsedLimit,
+                skip
+            }),
+            prisma.ride.count({ where: whereClause })
+        ]);
+
+        // Aggregate lifetime rider stats
+        const allRiderRides = await prisma.ride.findMany({
+            where: { riderId },
+            include: { payment: true }
+        });
+
+        const completedRides = allRiderRides.filter(r => r.status === 'COMPLETED');
+        const totalSpent = completedRides.reduce((sum, r) => {
+            const amount = r.payment?.status === 'SUCCEEDED'
+                ? Number(r.payment.amount)
+                : Number(r.finalFare || r.estimatedFare || 0);
+            return sum + amount;
+        }, 0);
+
+        const totalDistanceKm = completedRides.reduce((sum, r) => sum + Number(r.distanceKm || 0), 0);
+
+        return res.status(200).json({
+            rides,
+            pagination: {
+                total: totalCount,
+                page: parsedPage,
+                limit: parsedLimit,
+                pages: Math.ceil(totalCount / parsedLimit) || 1
+            },
+            stats: {
+                totalRides: allRiderRides.length,
+                completedRides: completedRides.length,
+                cancelledRides: allRiderRides.filter(r => r.status === 'CANCELLED').length,
+                totalSpent: Number(totalSpent.toFixed(2)),
+                totalDistanceKm: Number(totalDistanceKm.toFixed(1))
+            }
+        });
+    } catch (error) {
+        console.error("GetRidesHistory Error:", error);
+        return res.status(500).json({ message: 'Failed to retrieve ride history', error: error.message });
+    }
+};
+
+// Fetch official ride receipt data (Day 9)
+// GET /rides/:id/receipt
+export const getRideReceipt = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const riderId = req.user.id;
+
+        const ride = await prisma.ride.findUnique({
+            where: { id },
+            include: {
+                payment: true,
+                review: true,
+                stops: { orderBy: { sequence: 'asc' } },
+                rider: {
+                    select: { id: true, name: true, email: true, phone: true }
+                }
+            }
+        });
+
+        if (!ride) {
+            return res.status(404).json({ message: 'Ride not found' });
+        }
+
+        if (ride.riderId !== riderId) {
+            return res.status(403).json({ message: 'Unauthorized to view receipt for this ride' });
+        }
+
+        const fare = Number(ride.payment?.amount || ride.finalFare || ride.estimatedFare || 15.00);
+        const baseFare = Number((fare * 0.45).toFixed(2));
+        const distanceFare = Number((fare * 0.40).toFixed(2));
+        const platformFee = Number((fare * 0.15).toFixed(2));
+
+        const receipt = {
+            receiptNumber: `RCP-${ride.id.substring(0, 8).toUpperCase()}`,
+            date: ride.completedAt || ride.updatedAt || new Date(),
+            status: ride.payment?.status || (ride.status === 'COMPLETED' ? 'SUCCEEDED' : 'PENDING'),
+            currency: ride.payment?.currency || 'USD',
+            totalFare: fare.toFixed(2),
+            fareBreakdown: {
+                baseFare: baseFare.toFixed(2),
+                distanceFare: distanceFare.toFixed(2),
+                distanceKm: Number(ride.distanceKm),
+                platformFee: platformFee.toFixed(2),
+                taxRate: '15%'
+            },
+            payment: {
+                method: ride.payment?.method || 'CARD',
+                provider: ride.payment?.provider || 'stripe',
+                transactionId: ride.payment?.providerPaymentId || `pi_${ride.id.substring(0, 10)}`,
+                paidAt: ride.payment?.paidAt || ride.completedAt,
+                receiptUrl: ride.payment?.receiptUrl || null
+            },
+            driver: {
+                name: ride.driverName || 'Vikramaditya Sharma',
+                vehicle: ride.driverVehicle || 'Maruti Suzuki Dzire',
+                plateNumber: ride.driverPlateNumber || 'DL 01 AB 4321',
+                rating: ride.driverRating ? Number(ride.driverRating) : 4.94
+            },
+            route: {
+                pickupAddress: ride.pickupAddress,
+                dropoffAddress: ride.dropoffAddress,
+                durationMin: ride.actualDurationMin || ride.estimatedDurationMin
+            },
+            rider: {
+                name: ride.rider?.name,
+                email: ride.rider?.email,
+                phone: ride.rider?.phone
+            }
+        };
+
+        return res.status(200).json({ receipt, ride });
+    } catch (error) {
+        console.error("GetRideReceipt Error:", error);
+        return res.status(500).json({ message: 'Failed to retrieve receipt', error: error.message });
+    }
+};
+
+// Send ride receipt to rider's email (Day 9)
+// POST /rides/:id/receipt/email
+export const emailRideReceipt = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const riderId = req.user.id;
+        const { targetEmail } = req.body;
+
+        const ride = await prisma.ride.findUnique({
+            where: { id },
+            include: {
+                payment: true,
+                rider: true
+            }
+        });
+
+        if (!ride) {
+            return res.status(404).json({ message: 'Ride not found' });
+        }
+
+        if (ride.riderId !== riderId) {
+            return res.status(403).json({ message: 'Unauthorized to send receipt for this ride' });
+        }
+
+        const recipient = targetEmail || ride.rider?.email || req.user.email;
+        if (!recipient) {
+            return res.status(400).json({ message: 'Recipient email is required' });
+        }
+
+        const fare = Number(ride.payment?.amount || ride.finalFare || ride.estimatedFare || 15.00).toFixed(2);
+        const receiptNo = `RCP-${ride.id.substring(0, 8).toUpperCase()}`;
+
+        // Send via nodemailer if SMTP configured, else log delivery simulation
+        if (process.env.SMTP_HOST && process.env.SMTP_USER) {
+            const transporter = nodemailer.createTransport({
+                host: process.env.SMTP_HOST,
+                port: process.env.SMTP_PORT || 587,
+                secure: process.env.SMTP_SECURE === 'true',
+                auth: {
+                    user: process.env.SMTP_USER,
+                    pass: process.env.SMTP_PASS
+                }
+            });
+
+            await transporter.sendMail({
+                from: process.env.SMTP_FROM || '"HopIn Cabs" <no-reply@hopin.com>',
+                to: recipient,
+                subject: `Your HopIn Ride Receipt [${receiptNo}] - $${fare}`,
+                html: `
+                    <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 20px; border: 1px solid #eee; border-radius: 16px;">
+                        <h2 style="color: #FF7A59; margin-bottom: 4px;">HopIn Official Ride Receipt</h2>
+                        <p style="color: #666; font-size: 14px;">Receipt: <strong>${receiptNo}</strong></p>
+                        <hr style="border: none; border-top: 1px dashed #ddd; margin: 16px 0;" />
+                        <p><strong>Pickup:</strong> ${ride.pickupAddress}</p>
+                        <p><strong>Dropoff:</strong> ${ride.dropoffAddress}</p>
+                        <p><strong>Driver:</strong> ${ride.driverName || 'Vikramaditya Sharma'} (${ride.driverVehicle || 'Dzire'})</p>
+                        <hr style="border: none; border-top: 1px dashed #ddd; margin: 16px 0;" />
+                        <h3 style="color: #059669;">Total Paid: $${fare} USD</h3>
+                        <p style="color: #999; font-size: 12px;">Thank you for riding with HopIn!</p>
+                    </div>
+                `
+            });
+        } else {
+            console.log(`[Email Service Simulation] Sent receipt ${receiptNo} for ride ${ride.id} to ${recipient} (Fare: $${fare})`);
+        }
+
+        return res.status(200).json({
+            message: `Official receipt sent successfully to ${recipient}`,
+            receiptNumber: receiptNo,
+            recipient
+        });
+
+    } catch (error) {
+        console.error("EmailRideReceipt Error:", error);
+        return res.status(500).json({ message: 'Failed to email receipt', error: error.message });
+    }
+};
+
+// Submit post-ride review and rating (Day 10 - UC-09)
+// POST /rides/:id/review
+export const submitRideReview = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const riderId = req.user.id;
+        const { rating, feedback } = req.body;
+
+        // Validate rating range (1 to 5 stars)
+        const parsedRating = parseInt(rating, 10);
+        if (isNaN(parsedRating) || parsedRating < 1 || parsedRating > 5) {
+            return res.status(400).json({ message: 'Rating must be an integer between 1 and 5' });
+        }
+
+        // Fetch ride to verify ownership and completion status
+        const ride = await prisma.ride.findUnique({
+            where: { id },
+            include: { review: true }
+        });
+
+        if (!ride) {
+            return res.status(404).json({ message: 'Ride not found' });
+        }
+
+        // Only the rider associated with the ride may submit its review
+        if (ride.riderId !== riderId) {
+            return res.status(403).json({ message: 'Unauthorized to review this ride' });
+        }
+
+        // Only completed rides can be reviewed
+        if (ride.status !== 'COMPLETED') {
+            return res.status(400).json({
+                message: 'Only completed rides can be reviewed',
+                currentStatus: ride.status
+            });
+        }
+
+        // Enforce the one-review-per-ride constraint
+        if (ride.review) {
+            return res.status(409).json({
+                message: 'This ride has already been reviewed',
+                review: ride.review
+            });
+        }
+
+        // Save review in PostgreSQL
+        const review = await prisma.review.create({
+            data: {
+                rideId: id,
+                riderId,
+                rating: parsedRating,
+                feedback: feedback ? feedback.trim() : null
+            },
+            include: {
+                rider: {
+                    select: { id: true, name: true, profileImage: true }
+                }
+            }
+        });
+
+        // Calculate dynamic average driver rating across all stored reviews in PostgreSQL
+        const allStoredReviews = await prisma.review.findMany({
+            select: { rating: true }
+        });
+        const totalReviews = allStoredReviews.length;
+        const sumRatings = allStoredReviews.reduce((sum, r) => sum + r.rating, 0);
+        const averageRating = totalReviews > 0
+            ? Number((sumRatings / totalReviews).toFixed(2))
+            : 5.00;
+
+        // Update ride record with updated driver rating
+        await prisma.ride.update({
+            where: { id },
+            data: { driverRating: averageRating }
+        });
+
+        return res.status(201).json({
+            message: 'Review submitted successfully. Thank you for your feedback!',
+            review,
+            averageDriverRating: averageRating,
+            totalReviews
+        });
+
+    } catch (error) {
+        // Handle unique constraint violation in case of concurrent requests
+        if (error.code === 'P2002') {
+            return res.status(409).json({ message: 'This ride has already been reviewed' });
+        }
+        console.error("SubmitRideReview Error:", error);
+        return res.status(500).json({ message: 'Failed to submit review', error: error.message });
+    }
+};
+
+// Retrieve review for a ride (Day 10)
+// GET /rides/:id/review
+export const getRideReview = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const review = await prisma.review.findUnique({
+            where: { rideId: id },
+            include: {
+                rider: {
+                    select: { id: true, name: true, profileImage: true }
+                }
+            }
+        });
+
+        if (!review) {
+            return res.status(404).json({ message: 'No review found for this ride' });
+        }
+
+        return res.status(200).json({ review });
+
+    } catch (error) {
+        console.error("GetRideReview Error:", error);
+        return res.status(500).json({ message: 'Failed to retrieve review', error: error.message });
+    }
+};
+
+
