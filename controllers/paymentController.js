@@ -243,10 +243,6 @@ export const handleWebhook = async (req, res) => {
                     rideId: targetRideId,
                     payment: updatedPayment
                 });
-                io.to(`user_${ride.riderId}`).emit('payment_success', {
-                    rideId: targetRideId,
-                    payment: updatedPayment
-                });
             }
 
             console.log(`[Stripe Webhook] Successfully processed payment ${providerPaymentId} for ride ${targetRideId}`);

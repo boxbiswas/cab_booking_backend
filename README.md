@@ -149,13 +149,6 @@ backend/
 │   ├── promotionController.js     # Promo code logic and boundary checking
 │   ├── emergencyController.js     # SOS triggers and emergency contact CRUD
 │   └── supportController.js       # Customer support ticket processing
-│
-└── scripts/
-    ├── testDay13EndToEnd.js       # Full end-to-end multi-step verification test
-    ├── testDay12Features.js       # Multi-stop, SOS, and support ticket test suite
-    ├── testDay10Reviews.js        # Post-ride review and ratings test
-    ├── testDay9History.js         # Pagination, filter, and history test
-    └── testDay8Payment.js         # Stripe verified payment simulation test
 ```
 
 ---
@@ -226,8 +219,6 @@ erDiagram
 ---
 
 ## 🌐 REST API Reference
-
-All endpoints are clean, top-level routes without `/api` prefixes.
 
 ### 1. Authentication (`/auth`)
 | Method | Endpoint | Description |
