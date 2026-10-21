@@ -386,19 +386,20 @@ curl http://localhost:3000/health
 
 ---
 
-## 🧪 Automated Testing & Interactive Workflows
+## 🧪 Verification & Interactive Workflows
 
 <details>
-<summary><b>🤖 Click to expand: Run Automated End-to-End Test Suite</b></summary>
+<summary><b>🤖 Click to expand: Verify Server & Database Health</b></summary>
 
-HopIn includes an end-to-end integration test validating the entire ride-hailing flow:
+Verify that your local Express server and PostgreSQL database are properly operational:
 
 ```bash
-# Execute Day 13 complete verification suite
-node scripts/testDay13EndToEnd.js
+# Check API and database connectivity
+curl http://localhost:3000/health
+# Response: {"status":"ok","message":"HopIn Backend is healthy and database is connected"}
 ```
 
-**Workflow Tested:**
+**End-to-End Workflow Supported:**
 1. Rider registration and JWT cookie session verification.
 2. Forward geocoding of pickup and destination coordinates.
 3. Multi-tier fare calculation with OSRM driving distance.
