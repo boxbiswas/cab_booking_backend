@@ -53,26 +53,33 @@ The **HopIn Backend** coordinates all real-time events, financial transactions, 
 
 ```mermaid
 flowchart TD
-    Client[Rider Client / Frontend] <-->|HTTP / HTTPS (Cookies)| Express[Express 5 Server :3000]
-    Client <-->|WebSockets (ws://)| SocketIO[Socket.IO Server Engine]
+    Client["Rider Client / Frontend"]
+    Express["Express 5 Server (Port 3000)"]
+    SocketIO["Socket.IO Server Engine"]
     
-    subgraph Express Application
-        Security[Helmet + Rate Limiting + CORS] --> Router[Clean Top-Level Router]
-        Router --> Controllers[Business Logic Controllers]
-        Controllers --> Prisma[Prisma ORM Client]
-        Controllers --> StripeSDK[Stripe Payment Gateway]
-        Controllers --> GeoServices[Photon & OSRM Engine]
+    Client -->|"HTTP Requests (Cookies)"| Express
+    Express -->|"JSON Responses"| Client
+    
+    Client <--> SocketIO
+    SocketIO -->|"Live GPS & Telemetry"| Client
+    
+    subgraph ExpressApp ["Express Application"]
+        Security["Helmet + Rate Limiting + CORS"] --> Router["Clean Top-Level Router"]
+        Router --> Controllers["Business Logic Controllers"]
+        Controllers --> Prisma["Prisma ORM Client"]
+        Controllers --> StripeSDK["Stripe Payment Gateway"]
+        Controllers --> GeoServices["Photon & OSRM Engine"]
     end
     
-    Prisma <--> PostgreSQL[(PostgreSQL Database)]
+    Prisma <--> PostgreSQL[("PostgreSQL Database")]
     
-    subgraph Real-Time Telemetry
+    subgraph Telemetry ["Real-Time Telemetry"]
         SocketIO --> RideRooms["ride_{rideId} Room"]
         SocketIO --> UserRooms["user_{userId} Room"]
-        SimEngine[Driver GPS Simulation Loop] --> SocketIO
+        SimEngine["Driver GPS Simulation Loop"] --> SocketIO
     end
     
-    StripeSDK <-->|Cryptographic Webhook| Express
+    StripeSDK -->|"Cryptographic Webhook"| Express
 ```
 
 ---
