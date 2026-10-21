@@ -1,7 +1,5 @@
-/**
- * HopIn Core Workflow Automated Test Suite (Day 7)
- * Runs full end-to-end integration tests against the live Express backend & PostgreSQL database.
- */
+// HopIn Core Workflow Automated Test Suite (Day 7)
+// Runs full end-to-end integration tests against the live Express backend & PostgreSQL database.
 
 const BASE_URL = process.env.TEST_API_URL || 'http://localhost:3000';
 

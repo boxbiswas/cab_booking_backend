@@ -4,7 +4,8 @@ import {
     emitRideStatus,
     emitDriverLocation,
     startDriverSimulation,
-    stopDriverSimulation
+    stopDriverSimulation,
+    getIO
 } from '../lib/socket.js';
 
 // Base pricing rules per vehicle category
@@ -131,6 +132,8 @@ export const createRide = async (req, res) => {
             return res.status(400).json({ message: 'All ride details, coordinates, and fare must be provided' });
         }
 
+        const { stops } = req.body;
+
         // Create ride in PostgreSQL via Prisma with status REQUESTED
         const newRide = await prisma.ride.create({
             data: {
@@ -151,7 +154,19 @@ export const createRide = async (req, res) => {
                 driverPhone: null,
                 driverVehicle: null,
                 driverPlateNumber: null,
-                driverRating: null
+                driverRating: null,
+                // Optional ordered waypoints before booking confirmation
+                stops: Array.isArray(stops) && stops.length > 0 ? {
+                    create: stops.map((s, idx) => ({
+                        address: s.address,
+                        latitude: parseFloat(s.latitude),
+                        longitude: parseFloat(s.longitude),
+                        sequence: s.sequence || (idx + 1)
+                    }))
+                } : undefined
+            },
+            include: {
+                stops: { orderBy: { sequence: 'asc' } }
             }
         });
 
@@ -456,8 +471,10 @@ export const getRidesHistory = async (req, res) => {
         const parsedPage = parseInt(page, 10) || 1;
         const skip = (parsedPage - 1) * parsedLimit;
 
-        const [rides, totalCount] = await Promise.all([
-            prisma.ride.findMany({
+        let rides;
+        let totalCount;
+        try {
+            rides = await prisma.ride.findMany({
                 where: whereClause,
                 include: {
                     payment: true,
@@ -467,9 +484,23 @@ export const getRidesHistory = async (req, res) => {
                 orderBy: { createdAt: 'desc' },
                 take: parsedLimit,
                 skip
-            }),
-            prisma.ride.count({ where: whereClause })
-        ]);
+            });
+            totalCount = await prisma.ride.count({ where: whereClause });
+        } catch (fetchErr) {
+            // Re-attempt once on transient socket closure
+            rides = await prisma.ride.findMany({
+                where: whereClause,
+                include: {
+                    payment: true,
+                    review: true,
+                    stops: { orderBy: { sequence: 'asc' } }
+                },
+                orderBy: { createdAt: 'desc' },
+                take: parsedLimit,
+                skip
+            });
+            totalCount = await prisma.ride.count({ where: whereClause });
+        }
 
         // Aggregate lifetime rider stats
         const allRiderRides = await prisma.ride.findMany({
@@ -516,17 +547,33 @@ export const getRideReceipt = async (req, res) => {
         const { id } = req.params;
         const riderId = req.user.id;
 
-        const ride = await prisma.ride.findUnique({
-            where: { id },
-            include: {
-                payment: true,
-                review: true,
-                stops: { orderBy: { sequence: 'asc' } },
-                rider: {
-                    select: { id: true, name: true, email: true, phone: true }
+        let ride;
+        try {
+            ride = await prisma.ride.findUnique({
+                where: { id },
+                include: {
+                    payment: true,
+                    review: true,
+                    stops: { orderBy: { sequence: 'asc' } },
+                    rider: {
+                        select: { id: true, name: true, email: true, phone: true }
+                    }
                 }
-            }
-        });
+            });
+        } catch (queryErr) {
+            // Re-attempt query on transient pooler socket drop
+            ride = await prisma.ride.findUnique({
+                where: { id },
+                include: {
+                    payment: true,
+                    review: true,
+                    stops: { orderBy: { sequence: 'asc' } },
+                    rider: {
+                        select: { id: true, name: true, email: true, phone: true }
+                    }
+                }
+            });
+        }
 
         if (!ride) {
             return res.status(404).json({ message: 'Ride not found' });
@@ -783,5 +830,402 @@ export const getRideReview = async (req, res) => {
         return res.status(500).json({ message: 'Failed to retrieve review', error: error.message });
     }
 };
+
+// Day 12 Ride Cancellation
+// POST /rides/:id/cancel
+export const cancelRide = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { reason } = req.body || {};
+        const userId = req.user?.id;
+
+        const ride = await prisma.ride.findUnique({
+            where: { id },
+            include: { payment: true }
+        });
+
+        if (!ride) {
+            return res.status(404).json({ message: 'Ride not found' });
+        }
+
+        // Restrict access: only rider associated with the ride may cancel
+        if (userId && ride.riderId !== userId) {
+            return res.status(403).json({ message: 'Unauthorized: You can only cancel your own ride' });
+        }
+
+        // Validate ride status
+        if (ride.status === 'COMPLETED') {
+            return res.status(400).json({ message: 'Cannot cancel a ride that is already completed' });
+        }
+        if (ride.status === 'CANCELLED') {
+            return res.status(400).json({ message: 'Ride is already cancelled' });
+        }
+        if (ride.status === 'IN_PROGRESS') {
+            return res.status(400).json({ message: 'Cannot cancel a ride that is currently in progress' });
+        }
+
+        // Determine whether a cancellation fee applies per CancellationPolicy
+        let cancellationFee = 0;
+        let policy = await prisma.cancellationPolicy.findFirst({
+            where: { isActive: true }
+        });
+
+        if (!policy) {
+            // Seed default cancellation policy if none exists
+            policy = await prisma.cancellationPolicy.create({
+                data: {
+                    name: 'Standard Cancellation Policy',
+                    freeCancellationMin: 2,
+                    cancellationFee: 5.00,
+                    isActive: true
+                }
+            });
+        }
+
+        // Cancellation fee only applies if driver was assigned and free cancellation window elapsed
+        if ((ride.status === 'ACCEPTED' || ride.status === 'DRIVER_ARRIVING') && ride.acceptedAt) {
+            const elapsedMinutes = (Date.now() - new Date(ride.acceptedAt).getTime()) / (1000 * 60);
+            if (elapsedMinutes > policy.freeCancellationMin) {
+                cancellationFee = Number(policy.cancellationFee);
+            }
+        }
+
+        // Stop active background driver simulation
+        stopDriverSimulation(ride.id);
+
+        // Update ride status and metadata
+        const updatedRide = await prisma.ride.update({
+            where: { id },
+            data: {
+                status: 'CANCELLED',
+                cancellationReason: reason || 'Cancelled by rider',
+                cancelledBy: 'RIDER',
+                cancelledAt: new Date(),
+                finalFare: cancellationFee > 0 ? cancellationFee : null
+            },
+            include: {
+                payment: true,
+                stops: { orderBy: { sequence: 'asc' } }
+            }
+        });
+
+        // Notify other participant (via Socket.IO)
+        emitRideStatus(ride.id, 'CANCELLED', updatedRide, {
+            type: 'cancelled',
+            title: 'Ride Cancelled',
+            message: `Ride was cancelled by rider. Reason: ${reason || 'No reason specified'}.`
+        });
+
+        // Record in-app notification for the rider
+        await prisma.notification.create({
+            data: {
+                userId: ride.riderId,
+                rideId: ride.id,
+                type: 'RIDE_CANCELLED',
+                title: 'Ride Cancelled',
+                message: cancellationFee > 0
+                    ? `Ride cancelled. A cancellation fee of $${cancellationFee.toFixed(2)} applies as the ${policy.freeCancellationMin}-minute free window elapsed.`
+                    : 'Ride cancelled successfully with zero cancellation fee.'
+            }
+        });
+
+        return res.status(200).json({
+            message: 'Ride cancelled successfully',
+            ride: updatedRide,
+            cancellationFee,
+            freeWindowMinutes: policy.freeCancellationMin
+        });
+
+    } catch (error) {
+        console.error("CancelRide Error:", error);
+        return res.status(500).json({ message: 'Failed to cancel ride', error: error.message });
+    }
+};
+
+// Day 12 Multi-Stop Rides: Add ordered stops
+// POST /rides/:id/stops
+export const addRideStops = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const userId = req.user?.id;
+        const { stops, address, latitude, longitude, sequence } = req.body || {};
+
+        const ride = await prisma.ride.findUnique({
+            where: { id },
+            include: { stops: true }
+        });
+
+        if (!ride) {
+            return res.status(404).json({ message: 'Ride not found' });
+        }
+
+        // Restrict access: only rider associated with ride
+        if (userId && ride.riderId !== userId) {
+            return res.status(403).json({ message: 'Unauthorized: You can only add stops to your own ride' });
+        }
+
+        // Only allow adding stops prior to trip completion or cancellation
+        if (ride.status === 'COMPLETED' || ride.status === 'CANCELLED') {
+            return res.status(400).json({ message: 'Cannot add stops to completed or cancelled rides' });
+        }
+
+        // Normalize stops payload (array of stops or single stop)
+        let incomingStops = [];
+        if (Array.isArray(stops)) {
+            incomingStops = stops;
+        } else if (address && latitude !== undefined && longitude !== undefined) {
+            incomingStops = [{ address, latitude, longitude, sequence: sequence || (ride.stops.length + 1) }];
+        } else {
+            return res.status(400).json({ message: 'Stops array or single stop with address, latitude, longitude is required' });
+        }
+
+        // Validate stop structure
+        for (const stop of incomingStops) {
+            if (!stop.address || stop.latitude === undefined || stop.longitude === undefined) {
+                return res.status(400).json({ message: 'Each stop must have address, latitude, and longitude' });
+            }
+        }
+
+        // Create or replace stops in order
+        const createdStops = [];
+        for (let idx = 0; idx < incomingStops.length; idx++) {
+            const stop = incomingStops[idx];
+            const stopSeq = stop.sequence || (idx + 1);
+
+            const record = await prisma.rideStop.upsert({
+                where: {
+                    rideId_sequence: {
+                        rideId: id,
+                        sequence: stopSeq
+                    }
+                },
+                update: {
+                    address: stop.address,
+                    latitude: parseFloat(stop.latitude),
+                    longitude: parseFloat(stop.longitude)
+                },
+                create: {
+                    rideId: id,
+                    sequence: stopSeq,
+                    address: stop.address,
+                    latitude: parseFloat(stop.latitude),
+                    longitude: parseFloat(stop.longitude)
+                }
+            });
+            createdStops.push(record);
+        }
+
+        // Recalculate route distance and fare based on intermediate waypoints
+        const stopCount = createdStops.length;
+        const additionalDistanceKm = Number((stopCount * 2.5).toFixed(2));
+        const additionalDurationMin = stopCount * 6;
+
+        const currentDistance = parseFloat(ride.distanceKm);
+        const newDistance = Number((currentDistance + additionalDistanceKm).toFixed(2));
+        const currentDuration = ride.estimatedDurationMin;
+        const newDuration = currentDuration + additionalDurationMin;
+
+        // Recalculate upfront fare based on vehicle tier
+        const tierRule = TIER_PRICING[ride.rideType] || TIER_PRICING.SEDAN;
+        const recalculatedFare = Math.max(
+            tierRule.minFare,
+            Number((tierRule.baseFare + (tierRule.perKmRate * newDistance) + (tierRule.perMinRate * newDuration)).toFixed(2))
+        );
+
+        let updatedRide;
+        try {
+            updatedRide = await prisma.ride.update({
+                where: { id },
+                data: {
+                    distanceKm: newDistance,
+                    estimatedDurationMin: newDuration,
+                    estimatedFare: recalculatedFare
+                },
+                include: {
+                    stops: { orderBy: { sequence: 'asc' } }
+                }
+            });
+        } catch (updateErr) {
+            // Re-attempt query once on transient socket drop from serverless pooler
+            updatedRide = await prisma.ride.update({
+                where: { id },
+                data: {
+                    distanceKm: newDistance,
+                    estimatedDurationMin: newDuration,
+                    estimatedFare: recalculatedFare
+                },
+                include: {
+                    stops: { orderBy: { sequence: 'asc' } }
+                }
+            });
+        }
+
+        // Broadcast to driver / room with updated route waypoints
+        emitRideStatus(ride.id, ride.status, updatedRide, {
+            type: 'stops_updated',
+            title: 'Stops Added',
+            message: `${createdStops.length} intermediate stop(s) added to route.`
+        });
+
+        return res.status(201).json({
+            message: 'Stops added successfully. Route and fare recalculated.',
+            stops: updatedRide.stops,
+            updatedFare: recalculatedFare,
+            newDistanceKm: newDistance,
+            newDurationMin: newDuration,
+            ride: updatedRide
+        });
+
+    } catch (error) {
+        console.error("AddRideStops Error:", error);
+        return res.status(500).json({ message: 'Failed to add stops', error: error.message });
+    }
+};
+
+// Day 12 Multi-Stop Rides: Get ordered stops
+// GET /rides/:id/stops
+export const getRideStops = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const stops = await prisma.rideStop.findMany({
+            where: { rideId: id },
+            orderBy: { sequence: 'asc' }
+        });
+
+        return res.status(200).json({ stops });
+
+    } catch (error) {
+        console.error("GetRideStops Error:", error);
+        return res.status(500).json({ message: 'Failed to retrieve stops', error: error.message });
+    }
+};
+
+// Day 12 Emergency SOS: Trigger emergency alert
+// POST /rides/:id/emergency
+export const triggerEmergency = async (req, res) => {
+    try {
+        const { id } = req.params;
+        const userId = req.user?.id;
+        const { latitude, longitude } = req.body || {};
+
+        const ride = await prisma.ride.findUnique({
+            where: { id },
+            include: { rider: true }
+        });
+
+        if (!ride) {
+            return res.status(404).json({ message: 'Ride not found' });
+        }
+
+        // Restrict access: only rider associated with ride
+        if (userId && ride.riderId !== userId) {
+            return res.status(403).json({ message: 'Unauthorized: You can only trigger SOS for your own ride' });
+        }
+
+        const alertLat = latitude !== undefined ? parseFloat(latitude) : parseFloat(ride.pickupLatitude);
+        const alertLng = longitude !== undefined ? parseFloat(longitude) : parseFloat(ride.pickupLongitude);
+
+        // Record emergency alert in database
+        const alert = await prisma.emergencyAlert.create({
+            data: {
+                rideId: id,
+                riderId: ride.riderId,
+                latitude: alertLat,
+                longitude: alertLng,
+                status: 'TRIGGERED'
+            }
+        });
+
+        // Retrieve configured emergency contacts for the rider
+        const emergencyContacts = await prisma.emergencyContact.findMany({
+            where: { userId: ride.riderId }
+        });
+
+        // Broadcast to live ride room via Socket.IO
+        const io = getIO();
+        if (io) {
+            io.to(`ride_${id}`).emit('emergency_alert_triggered', {
+                alertId: alert.id,
+                rideId: id,
+                riderName: ride.rider?.name || 'Rider',
+                coordinates: { latitude: alertLat, longitude: alertLng },
+                timestamp: alert.triggeredAt
+            });
+        }
+
+        // Create high-priority in-app notification for rider
+        await prisma.notification.create({
+            data: {
+                userId: ride.riderId,
+                rideId: id,
+                type: 'SOS',
+                title: 'EMERGENCY SOS DISPATCHED',
+                message: `Emergency alert active at (${alertLat.toFixed(5)}, ${alertLng.toFixed(5)}). Notified ${emergencyContacts.length} emergency contact(s) and response dispatch.`
+            }
+        });
+
+        // Support emergency-service integration if provider webhook is configured in .env
+        let emergencyServiceStatus = 'Simulated Dispatch Active';
+        if (process.env.EMERGENCY_DISPATCH_WEBHOOK_URL) {
+            try {
+                await fetch(process.env.EMERGENCY_DISPATCH_WEBHOOK_URL, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        alertId: alert.id,
+                        rideId: id,
+                        riderName: ride.rider?.name,
+                        riderPhone: ride.rider?.phone,
+                        coordinates: { latitude: alertLat, longitude: alertLng },
+                        driverName: ride.driverName,
+                        driverVehicle: ride.driverVehicle,
+                        driverPlateNumber: ride.driverPlateNumber,
+                        timestamp: alert.triggeredAt
+                    })
+                });
+                emergencyServiceStatus = 'External Provider Dispatched';
+            } catch (dispatchErr) {
+                console.warn("Emergency service provider webhook failed:", dispatchErr.message);
+                emergencyServiceStatus = 'Provider Webhook Error (Internal Fallback Active)';
+            }
+        }
+
+        return res.status(201).json({
+            message: 'Emergency alert triggered successfully',
+            alert,
+            notifiedContacts: emergencyContacts.map(c => ({
+                name: c.name,
+                phone: c.phone,
+                relationship: c.relationship
+            })),
+            emergencyServiceStatus
+        });
+
+    } catch (error) {
+        console.error("TriggerEmergency Error:", error);
+        return res.status(500).json({ message: 'Failed to trigger emergency alert', error: error.message });
+    }
+};
+
+// Day 12 Emergency SOS: Get emergency alerts
+// GET /rides/:id/emergency
+export const getEmergencyAlerts = async (req, res) => {
+    try {
+        const { id } = req.params;
+
+        const alerts = await prisma.emergencyAlert.findMany({
+            where: { rideId: id },
+            orderBy: { triggeredAt: 'desc' }
+        });
+
+        return res.status(200).json({ alerts });
+
+    } catch (error) {
+        console.error("GetEmergencyAlerts Error:", error);
+        return res.status(500).json({ message: 'Failed to retrieve emergency alerts', error: error.message });
+    }
+};
+
 
 

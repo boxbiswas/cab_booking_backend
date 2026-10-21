@@ -22,18 +22,29 @@ export const register = async (req, res) => {
             return res.status(400).json({ message: 'All fields are required' });
         }
 
-        // Check if user already exists
-        const existingUser = await prisma.user.findUnique({ where: { email } });
+        // Check if user or phone already exists with cold start recovery
+        let existingUser;
+        try {
+            existingUser = await prisma.user.findUnique({ where: { email } });
+        } catch (err) {
+            // Transient Neon wake-up recovery
+            await new Promise(r => setTimeout(r, 800));
+            existingUser = await prisma.user.findUnique({ where: { email } });
+        }
         if (existingUser) {
             return res.status(400).json({ message: 'Email is already registered' });
+        }
+
+        // Fallback phone if not provided
+        const userPhone = phone || `+1${Date.now().toString().slice(-10)}`;
+        const existingPhone = await prisma.user.findUnique({ where: { phone: userPhone } });
+        if (existingPhone) {
+            return res.status(400).json({ message: 'Phone number is already registered' });
         }
 
         // Hash password
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash(password, salt);
-
-        // Fallback phone if not provided
-        const userPhone = phone || `+1${Date.now().toString().slice(-10)}`;
 
         // Create user
         const newUser = await prisma.user.create({
@@ -52,7 +63,7 @@ export const register = async (req, res) => {
 
     } catch (error) {
         console.error("Register Error:", error);
-        return res.status(500).json({ message: 'Internal server error' });
+        return res.status(500).json({ message: error.message || 'Internal server error' });
     }
 };
 

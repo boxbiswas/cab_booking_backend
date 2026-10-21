@@ -2,6 +2,8 @@ import "dotenv/config";
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
+import helmet from 'helmet';
+import rateLimit from 'express-rate-limit';
 
 import { createServer } from 'node:http';
 import { prisma } from "./lib/prisma.js";
@@ -14,15 +16,35 @@ import driverRoutes from "./routes/driverRoutes.js";
 import mapRoute from "./routes/mapRoute.js";
 import rideRoute from "./routes/rideRoute.js";
 import paymentRouter, { paymentMethodRouter } from "./routes/paymentRoutes.js";
+import promotionRoutes from "./routes/promotionRoutes.js";
+import emergencyRoutes from "./routes/emergencyRoutes.js";
+import supportRoutes from "./routes/supportRoutes.js";
 
 const app = express();
+
+// Security headers with Helmet
+app.use(helmet({
+    crossOriginResourcePolicy: false,
+    crossOriginEmbedderPolicy: false
+}));
+
+// Rate limiting protection
+const apiLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 200,
+    standardHeaders: true,
+    legacyHeaders: false,
+    message: { message: 'Too many requests from this IP, please try again after 15 minutes' }
+});
+app.use(apiLimiter);
 
 // Cors configuration
 app.use(cors({
     origin: [
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "http://127.0.0.1:5173"
     ],
-    credentials: true, // Allows cookies to be sent back and forth
+    credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Cookie', 'stripe-signature']
 }));
@@ -37,7 +59,7 @@ app.use(express.json({
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 app.use(cookieParser());
 
-// Use routes (Direct clean routes for Rider app only)
+// Direct clean routes for Rider app
 app.use('/auth', authRoute);
 app.use('/profile', profileRoutes);
 app.use('/driver', driverRoutes);
@@ -46,6 +68,9 @@ app.use('/maps', mapRoute);
 app.use('/rides', rideRoute);
 app.use('/payments', paymentRouter);
 app.use('/payment-methods', paymentMethodRouter);
+app.use('/promotions', promotionRoutes);
+app.use('/emergency-contacts', emergencyRoutes);
+app.use('/support', supportRoutes);
 
 // Health check endpoint
 app.get('/health', async (req, res) => {
